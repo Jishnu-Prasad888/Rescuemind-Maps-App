@@ -1,9 +1,8 @@
 import axios from "axios";
+import * as Location from "expo-location";
 import React, { useEffect, useState } from "react";
 import { FlatList, StyleSheet, Text, View } from "react-native";
-import Geolocation from "react-native-geolocation-service";
 import MapView, { Marker, Polyline, Region } from "react-native-maps";
-
 const ORS_API_KEY = process.env.EXPO_PUBLIC_ORS_API_KEY;
 
 if (!ORS_API_KEY) {
@@ -33,22 +32,32 @@ export default function TabTwoScreen() {
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
 
   useEffect(() => {
-    Geolocation.watchPosition(
-      (position) => {
-        const { latitude, longitude } = position.coords;
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") {
+        console.error("Location permission not granted");
+        return;
+      }
 
-        setRegion({
-          latitude,
-          longitude,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
-        });
+      Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.High,
+          distanceInterval: 5,
+        },
+        (location) => {
+          const { latitude, longitude } = location.coords;
 
-        fetchRoute(latitude, longitude);
-      },
-      (error) => console.log(error),
-      { enableHighAccuracy: true, distanceFilter: 5 },
-    );
+          setRegion({
+            latitude,
+            longitude,
+            latitudeDelta: 0.01,
+            longitudeDelta: 0.01,
+          });
+
+          fetchRoute(latitude, longitude);
+        },
+      );
+    })();
   }, []);
 
   const fetchRoute = async (lat: number, lng: number) => {
