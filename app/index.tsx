@@ -22,6 +22,7 @@ export default function Home() {
   const [routeCoords, setRouteCoords] = useState<Coordinate[]>([]);
   const requestCountRef = React.useRef(0);
   const lastRequestTimeRef = React.useRef(0);
+  const cancelTokenRef = React.useRef<AbortController | null>(null);
   const DAILY_QUOTA = 2000;
   const SAFETY_LIMIT = Math.floor(DAILY_QUOTA * 0.75);
   const [startPoint, setStartPoint] = useState<Coordinate | null>(null);
@@ -31,7 +32,6 @@ export default function Home() {
   const mapRef = React.useRef<MapView | null>(null);
   const [userLocation, setUserLocation] = useState<Coordinate | null>(null);
 
-  const REQUEST_INTERVAL_MS = 15000; // 15 seconds between calls
   const DISABLE_QUOTA_GUARD = false; // set true to disable safeguard
 
   const handleMapPress = (event: any) => {
@@ -75,12 +75,15 @@ export default function Home() {
 
       Location.watchPositionAsync(
         {
-          accuracy: Location.Accuracy.High,
-          distanceInterval: 10,
+          accuracy: Location.Accuracy.BestForNavigation,
+          timeInterval: 2000,
+          distanceInterval: 1,
         },
         (location) => {
           const { latitude, longitude } = location.coords;
-
+          if (location.coords.accuracy && location.coords.accuracy > 30) {
+            return; // ignore low accuracy fixes
+          }
           setUserLocation({ latitude, longitude });
           setRegion({
             latitude,
@@ -104,18 +107,21 @@ export default function Home() {
       return;
     }
 
-    const now = Date.now();
-
-    if (now - lastRequestTimeRef.current < REQUEST_INTERVAL_MS) {
-      return;
+    // Cancel previous request if still pending
+    if (cancelTokenRef.current) {
+      cancelTokenRef.current.abort();
     }
 
+    // Check quota limit
     if (!DISABLE_QUOTA_GUARD && requestCountRef.current >= SAFETY_LIMIT) {
       console.warn("75% quota reached. Calls blocked.");
       return;
     }
 
-    lastRequestTimeRef.current = now;
+    // Create new abort controller for this request
+    const controller = new AbortController();
+    cancelTokenRef.current = controller;
+
     requestCountRef.current += 1;
 
     try {
@@ -126,12 +132,16 @@ export default function Home() {
             [startLng, startLat],
             [endLng, endLat],
           ],
+          preference: "fastest",
+          geometry_simplify: false, // Higher resolution polylines
+          extra_info: ["waytype", "surface"],
         },
         {
           headers: {
             Authorization: ORS_API_KEY,
             "Content-Type": "application/json",
           },
+          signal: controller.signal,
         },
       );
 
@@ -140,17 +150,39 @@ export default function Home() {
         latitude: c[1],
         longitude: c[0],
       }));
+
+      // Smooth the polyline by interpolating midpoints
+      const smoothCoords = coords.flatMap(
+        (point: Coordinate, index: number) => {
+          if (index === 0) return [point];
+
+          const prev = coords[index - 1];
+
+          return [
+            {
+              latitude: (prev.latitude + point.latitude) / 2,
+              longitude: (prev.longitude + point.longitude) / 2,
+            },
+            point,
+          ];
+        },
+      );
+
       const summary = feature.properties.summary;
 
       setDistance((summary.distance / 1000).toFixed(2) + " km");
       setDuration(Math.round(summary.duration / 60) + " min");
 
-      setRouteCoords(coords);
-      mapRef.current?.fitToCoordinates(coords, {
+      setRouteCoords(smoothCoords);
+      mapRef.current?.fitToCoordinates(smoothCoords, {
         edgePadding: { top: 150, right: 50, bottom: 250, left: 50 },
         animated: true,
       });
-    } catch (error) {
+    } catch (error: any) {
+      // Ignore cancelled requests (user changed route while fetching)
+      if (error.name === "CanceledError" || error.code === "ERR_CANCELED") {
+        return;
+      }
       console.log("Route fetch failed:", error);
     }
   };
@@ -178,8 +210,8 @@ export default function Home() {
       mapRef.current?.animateToRegion({
         latitude: userLocation.latitude,
         longitude: userLocation.longitude,
-        latitudeDelta: 0.01,
-        longitudeDelta: 0.01,
+        latitudeDelta: 0.003, // Tighter zoom
+        longitudeDelta: 0.003,
       });
     }
   };
